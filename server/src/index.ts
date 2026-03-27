@@ -1,7 +1,17 @@
 import { WebSocketServer } from 'ws';
 
 
-const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
-
+var PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+console.log("Hello");
 // WebSocket server
-const wss = new WebSocketServer({ port: PORT });
+var wss = new WebSocketServer({ port: PORT });
+
+wss.on('connection', (ws) => {
+  console.log('Client connected');
+
+  ws.on('message', (message) => {
+    var parsed = JSON.parse(message.toString());
+
+    console.log(parsed);
+  });
+});
