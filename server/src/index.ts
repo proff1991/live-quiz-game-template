@@ -1,8 +1,10 @@
+import { randomInt, randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import type { WebSocket } from 'ws';
-import type { User, WSMessage } from './types';
+import type { RawData, WebSocket } from 'ws';
+import type { CreateGameData, Game, Question, User, WSMessage } from './types';
 
 var users: User[] = [];
+var games: Game[] = [];
 var userIdCounter = 1;
 var connectionToUserIndex = new WeakMap<WebSocket, string>();
 
@@ -52,15 +54,25 @@ var sendRegResponse = (
     });
 };
 
-var parseIncomingMessage = (rawMessage: unknown): WSMessage | null => {
-    if (typeof rawMessage !== 'string' && !Buffer.isBuffer(rawMessage)) {
+var parseIncomingMessage = (rawMessage: RawData): WSMessage | null => {
+    var rawText = '';
+
+    if (typeof rawMessage === 'string') {
+        rawText = rawMessage;
+    } else if (Buffer.isBuffer(rawMessage)) {
+        rawText = rawMessage.toString();
+    } else if (rawMessage instanceof ArrayBuffer) {
+        rawText = Buffer.from(rawMessage).toString();
+    } else if (Array.isArray(rawMessage)) {
+        rawText = Buffer.concat(rawMessage).toString();
+    } else {
         return null;
     }
 
     var parsed: unknown;
 
     try {
-        parsed = JSON.parse(rawMessage.toString());
+        parsed = JSON.parse(rawText);
     } catch {
         return null;
     }
@@ -108,6 +120,116 @@ var getNormalizedCredentials = (data: unknown) => {
         name: name,
         password: password
     };
+};
+
+var getAuthorizedUser = (ws: WebSocket): User | null => {
+    var userIndex = connectionToUserIndex.get(ws);
+
+    if (!userIndex) {
+        return null;
+    }
+
+    var user = users.find((item) => item.index === userIndex);
+
+    if (!user) {
+        return null;
+    }
+
+    if (user.ws !== ws) {
+        return null;
+    }
+
+    return user;
+};
+
+var isValidQuestion = (value: unknown): value is Question => {
+    if (!isObject(value)) {
+        return false;
+    }
+
+    if (typeof value.text !== 'string' || !value.text.trim()) {
+        return false;
+    }
+
+    if (!Array.isArray(value.options) || value.options.length !== 4) {
+        return false;
+    }
+
+    if (
+        value.options.some((option) => {
+            return typeof option !== 'string' || !option.trim();
+        })
+    ) {
+        return false;
+    }
+
+    if (
+        typeof value.correctIndex !== 'number' ||
+        !Number.isInteger(value.correctIndex) ||
+        value.correctIndex < 0 ||
+        value.correctIndex > 3
+    ) {
+        return false;
+    }
+
+    if (
+        typeof value.timeLimitSec !== 'number' ||
+        !Number.isInteger(value.timeLimitSec) ||
+        value.timeLimitSec < 1
+    ) {
+        return false;
+    }
+
+    return true;
+};
+
+var getCreateGamePayload = (data: unknown): CreateGameData | null => {
+    if (!isObject(data)) {
+        return null;
+    }
+
+    if (!Array.isArray(data.questions) || data.questions.length < 1) {
+        return null;
+    }
+
+    var normalizedQuestions: Question[] = [];
+
+    for (var i = 0; i < data.questions.length; i += 1) {
+        var question = data.questions[i];
+
+        if (!isValidQuestion(question)) {
+            return null;
+        }
+
+        normalizedQuestions.push({
+            text: question.text.trim(),
+            options: question.options.map((option) => option.trim()),
+            correctIndex: question.correctIndex,
+            timeLimitSec: question.timeLimitSec
+        });
+    }
+
+    return {
+        questions: normalizedQuestions
+    };
+};
+
+var generateRoomCode = () => {
+    var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    var code = '';
+    var isUnique = false;
+
+    while (!isUnique) {
+        code = '';
+
+        for (var i = 0; i < 6; i += 1) {
+            code += alphabet[randomInt(0, alphabet.length)];
+        }
+
+        isUnique = !games.some((game) => game.code === code);
+    }
+
+    return code;
 };
 
 var handleReg = (ws: WebSocket, message: WSMessage) => {
@@ -164,6 +286,44 @@ var handleReg = (ws: WebSocket, message: WSMessage) => {
     sendRegResponse(ws, existingUser.name, existingUser.index, false, '');
 };
 
+var handleCreateGame = (ws: WebSocket, message: WSMessage) => {
+    var user = getAuthorizedUser(ws);
+
+    if (!user) {
+        sendError(ws, 'You must register first');
+        return;
+    }
+
+    var payload = getCreateGamePayload(message.data);
+
+    if (!payload) {
+        sendError(ws, 'Invalid questions payload');
+        return;
+    }
+
+    var newGame: Game = {
+        id: randomUUID(),
+        code: generateRoomCode(),
+        hostId: user.index,
+        questions: payload.questions,
+        players: [],
+        currentQuestion: -1,
+        status: 'waiting',
+        playerAnswers: new Map()
+    };
+
+    games.push(newGame);
+
+    send(ws, {
+        type: 'game_created',
+        data: {
+            gameId: newGame.id,
+            code: newGame.code
+        },
+        id: 0
+    });
+};
+
 wss.on('connection', (ws) => {
     console.log('Client connected');
 
@@ -183,9 +343,13 @@ wss.on('connection', (ws) => {
         if (parsed.type === 'reg') {
             handleReg(ws, parsed);
             return;
+        } else if (parsed.type === 'create_game') {
+            handleCreateGame(ws, parsed);
+            return;
+        } else {
+            sendError(ws, 'Unknown message type');
+            return;
         }
-
-        sendError(ws, 'Unknown message type');
     });
 
     ws.on('close', () => {
