@@ -869,6 +869,39 @@ var handleAnswer = (ws: WebSocket, message: WSMessage) => {
     }
 };
 
+var handleDisconnectedUserGames = (userIndex: string, ws: WebSocket) => {
+    games.forEach((game) => {
+        var playerIndex = game.players.findIndex((item) => {
+            return item.index === userIndex && item.ws === ws;
+        });
+
+        if (playerIndex === -1) {
+            return;
+        }
+
+        game.players.splice(playerIndex, 1);
+        game.playerAnswers.delete(userIndex);
+
+        broadcastPlayersUpdate(game);
+
+        if (game.status !== 'in_progress') {
+            return;
+        }
+
+        if (typeof game.questionStartTime !== 'number') {
+            return;
+        }
+
+        var shouldFinishQuestion =
+            game.players.length === 0 ||
+            game.players.every((item) => item.hasAnswered === true);
+
+        if (shouldFinishQuestion) {
+            finishCurrentQuestion(game);
+        }
+    });
+};
+
 wss.on('connection', (ws) => {
     console.log('Client connected');
 
@@ -908,6 +941,7 @@ wss.on('connection', (ws) => {
 
     ws.on('close', () => {
         console.log('Client disconnected');
+
         var userIndex = connectionToUserIndex.get(ws);
 
         if (!userIndex) {
@@ -920,16 +954,9 @@ wss.on('connection', (ws) => {
             user.ws = undefined;
         }
 
-        games.forEach((game) => {
-            var player = game.players.find((item) => item.index === userIndex);
-
-            if (player && player.ws === ws) {
-                player.ws = undefined;
-            }
-        });
+        handleDisconnectedUserGames(userIndex, ws);
 
         connectionToUserIndex.delete(ws);
-        console.log('Client disconnected');
     });
 
     ws.on('error', (err) => {
