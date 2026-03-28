@@ -1,7 +1,7 @@
 import { randomInt, randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import type { RawData, WebSocket } from 'ws';
-import type { CreateGameData, Game, Question, User, WSMessage } from './types';
+import type { CreateGameData, Game, JoinGameData, Player, Question, User, WSMessage } from './types';
 
 var users: User[] = [];
 var games: Game[] = [];
@@ -214,6 +214,26 @@ var getCreateGamePayload = (data: unknown): CreateGameData | null => {
     };
 };
 
+var getJoinGamePayload = (data: unknown): JoinGameData | null => {
+    if (!isObject(data)) {
+        return null;
+    }
+
+    if (typeof data.code !== 'string') {
+        return null;
+    }
+
+    var code = data.code.trim().toUpperCase();
+
+    if (!code || code.length !== 6) {
+        return null;
+    }
+
+    return {
+        code: code
+    };
+};
+
 var generateRoomCode = () => {
     var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     var code = '';
@@ -230,6 +250,46 @@ var generateRoomCode = () => {
     }
 
     return code;
+};
+
+var getGameRecipients = (game: Game) => {
+    var recipients: WebSocket[] = [];
+
+    var host = users.find((user) => user.index === game.hostId);
+
+    if (host && host.ws) {
+        recipients.push(host.ws);
+    }
+
+    game.players.forEach((player) => {
+        if (player.ws && !recipients.includes(player.ws)) {
+            recipients.push(player.ws);
+        }
+    });
+
+    return recipients;
+};
+
+var broadcastToGame = (game: Game, payload: WSMessage) => {
+    var recipients = getGameRecipients(game);
+
+    recipients.forEach((client) => {
+        send(client, payload);
+    });
+};
+
+var broadcastPlayersUpdate = (game: Game) => {
+    broadcastToGame(game, {
+        type: 'update_players',
+        data: game.players.map((player) => {
+            return {
+                name: player.name,
+                index: player.index,
+                score: player.score
+            };
+        }),
+        id: 0
+    });
 };
 
 var handleReg = (ws: WebSocket, message: WSMessage) => {
@@ -324,6 +384,91 @@ var handleCreateGame = (ws: WebSocket, message: WSMessage) => {
     });
 };
 
+var handleJoinGame = (ws: WebSocket, message: WSMessage) => {
+    var user = getAuthorizedUser(ws);
+
+    if (!user) {
+        sendError(ws, 'You must register first');
+        return;
+    }
+
+    var payload = getJoinGamePayload(message.data);
+
+    if (!payload) {
+        sendError(ws, 'Invalid join payload');
+        return;
+    }
+
+    var userIndex = user.index;
+    var userName = user.name;
+    var code = payload.code;
+
+    var game = games.find((item) => item.code === code);
+
+    if (!game) {
+        sendError(ws, 'Game not found');
+        return;
+    }
+
+    if (game.status !== 'waiting') {
+        sendError(ws, 'Game already started');
+        return;
+    }
+
+    if (game.hostId === userIndex) {
+        sendError(ws, 'Host cannot join as player');
+        return;
+    }
+
+    var existingPlayer = game.players.find((player) => player.index === userIndex);
+
+    if (existingPlayer) {
+        existingPlayer.ws = ws;
+
+        send(ws, {
+            type: 'game_joined',
+            data: {
+                gameId: game.id
+            },
+            id: 0
+        });
+
+        broadcastPlayersUpdate(game);
+        return;
+    }
+
+    var player: Player = {
+        name: userName,
+        index: userIndex,
+        score: 0,
+        ws: ws,
+        hasAnswered: false,
+        answerTime: 0,
+        answeredCorrectly: false
+    };
+
+    game.players.push(player);
+
+    send(ws, {
+        type: 'game_joined',
+        data: {
+            gameId: game.id
+        },
+        id: 0
+    });
+
+    broadcastToGame(game, {
+        type: 'player_joined',
+        data: {
+            playerName: player.name,
+            playerCount: game.players.length
+        },
+        id: 0
+    });
+
+    broadcastPlayersUpdate(game);
+};
+
 wss.on('connection', (ws) => {
     console.log('Client connected');
 
@@ -346,6 +491,9 @@ wss.on('connection', (ws) => {
         } else if (parsed.type === 'create_game') {
             handleCreateGame(ws, parsed);
             return;
+        } else if (parsed.type === 'join_game') {
+            handleJoinGame(ws, parsed);
+            return;
         } else {
             sendError(ws, 'Unknown message type');
             return;
@@ -354,7 +502,6 @@ wss.on('connection', (ws) => {
 
     ws.on('close', () => {
         console.log('Client disconnected');
-
         var userIndex = connectionToUserIndex.get(ws);
 
         if (!userIndex) {
@@ -367,7 +514,16 @@ wss.on('connection', (ws) => {
             user.ws = undefined;
         }
 
+        games.forEach((game) => {
+            var player = game.players.find((item) => item.index === userIndex);
+
+            if (player && player.ws === ws) {
+                player.ws = undefined;
+            }
+        });
+
         connectionToUserIndex.delete(ws);
+        console.log('Client disconnected');
     });
 
     ws.on('error', (err) => {
