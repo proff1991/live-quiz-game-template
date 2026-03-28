@@ -1,7 +1,7 @@
 import { randomInt, randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import type { RawData, WebSocket } from 'ws';
-import type { CreateGameData, Game, JoinGameData, Player, Question, StartGameData, User, WSMessage } from './types';
+import type { AnswerData, CreateGameData, Game, JoinGameData, Player, Question, StartGameData, User, WSMessage } from './types';
 
 var users: User[] = [];
 var games: Game[] = [];
@@ -254,6 +254,42 @@ var getStartGamePayload = (data: unknown): StartGameData | null => {
     };
 };
 
+var getAnswerPayload = (data: unknown): AnswerData | null => {
+    if (!isObject(data)) {
+        return null;
+    }
+
+    if (
+        typeof data.gameId !== 'string' ||
+        typeof data.questionIndex !== 'number' ||
+        typeof data.answerIndex !== 'number'
+    ) {
+        return null;
+    }
+
+    var gameId = data.gameId.trim();
+    var questionIndex = data.questionIndex;
+    var answerIndex = data.answerIndex;
+
+    if (!gameId) {
+        return null;
+    }
+
+    if (!Number.isInteger(questionIndex) || questionIndex < 0) {
+        return null;
+    }
+
+    if (!Number.isInteger(answerIndex) || answerIndex < 0) {
+        return null;
+    }
+
+    return {
+        gameId: gameId,
+        questionIndex: questionIndex,
+        answerIndex: answerIndex
+    };
+};
+
 var generateRoomCode = () => {
     var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     var code = '';
@@ -330,6 +366,184 @@ var broadcastCurrentQuestion = (game: Game) => {
         },
         id: 0
     });
+};
+
+var clearQuestionTimer = (game: Game) => {
+    if (game.questionTimer) {
+        clearTimeout(game.questionTimer);
+        game.questionTimer = undefined;
+    }
+};
+
+var buildScoreboard = (game: Game) => {
+    var sortedPlayers = game.players.slice().sort((a, b) => b.score - a.score);
+
+    return sortedPlayers.map((player, index) => {
+        return {
+            name: player.name,
+            score: player.score,
+            rank: index + 1
+        };
+    });
+};
+
+var finishGame = (game: Game) => {
+    clearQuestionTimer(game);
+    game.status = 'finished';
+    game.questionStartTime = undefined;
+    game.playerAnswers.clear();
+
+    broadcastToGame(game, {
+        type: 'game_finished',
+        data: {
+            scoreboard: buildScoreboard(game)
+        },
+        id: 0
+    });
+};
+
+var finishCurrentQuestion = (game: Game) => {
+    if (game.status !== 'in_progress') {
+        return;
+    }
+
+    if (typeof game.questionStartTime !== 'number') {
+        return;
+    }
+
+    var questionIndex = game.currentQuestion;
+    var question = game.questions[questionIndex];
+
+    if (!question) {
+        return;
+    }
+
+    var startedAt = game.questionStartTime;
+    var timeLimitMs = question.timeLimitSec * 1000;
+
+    clearQuestionTimer(game);
+    game.questionStartTime = undefined;
+
+    var playerResults = game.players.map((player) => {
+        var answer = game.playerAnswers.get(player.index);
+        var answered = Boolean(answer);
+        var correct = false;
+        var pointsEarned = 0;
+
+        if (answer) {
+            correct = answer.answerIndex === question.correctIndex;
+
+            if (correct) {
+                var elapsedMs = answer.timestamp - startedAt;
+
+                if (elapsedMs < 0) {
+                    elapsedMs = 0;
+                }
+
+                if (elapsedMs > timeLimitMs) {
+                    elapsedMs = timeLimitMs;
+                }
+
+                var timeRemainingMs = timeLimitMs - elapsedMs;
+
+                pointsEarned = Math.round((1000 * timeRemainingMs) / timeLimitMs);
+                player.score += pointsEarned;
+            }
+        }
+
+        player.hasAnswered = answered;
+        player.answerTime = answer ? answer.timestamp : 0;
+        player.answeredCorrectly = correct;
+
+        return {
+            name: player.name,
+            answered: answered,
+            correct: correct,
+            pointsEarned: pointsEarned,
+            totalScore: player.score
+        };
+    });
+
+    broadcastToGame(game, {
+        type: 'question_result',
+        data: {
+            questionIndex: questionIndex,
+            correctIndex: question.correctIndex,
+            playerResults: playerResults
+        },
+        id: 0
+    });
+
+    game.playerAnswers.clear();
+
+    var nextQuestionIndex = questionIndex + 1;
+
+    if (nextQuestionIndex < game.questions.length) {
+        setTimeout(() => {
+            startQuestion(game, nextQuestionIndex);
+        }, 3000);
+    } else {
+        setTimeout(() => {
+            finishGame(game);
+        }, 3000);
+    }
+};
+
+var startQuestion = (game: Game, questionIndex: number) => {
+    if (game.status !== 'in_progress') {
+        return;
+    }
+
+    var question = game.questions[questionIndex];
+
+    if (!question) {
+        return;
+    }
+
+    clearQuestionTimer(game);
+
+    game.currentQuestion = questionIndex;
+    game.questionStartTime = Date.now();
+    game.playerAnswers.clear();
+
+    game.players.forEach((player) => {
+        player.hasAnswered = false;
+        player.answerTime = 0;
+        player.answeredCorrectly = false;
+    });
+
+    broadcastToGame(game, {
+        type: 'question',
+        data: {
+            questionNumber: questionIndex + 1,
+            totalQuestions: game.questions.length,
+            text: question.text,
+            options: question.options,
+            timeLimitSec: question.timeLimitSec
+        },
+        id: 0
+    });
+
+    var currentGameId = game.id;
+    var currentQuestionIndex = questionIndex;
+
+    game.questionTimer = setTimeout(() => {
+        var freshGame = games.find((item) => item.id === currentGameId);
+
+        if (!freshGame) {
+            return;
+        }
+
+        if (freshGame.status !== 'in_progress') {
+            return;
+        }
+
+        if (freshGame.currentQuestion !== currentQuestionIndex) {
+            return;
+        }
+
+        finishCurrentQuestion(freshGame);
+    }, question.timeLimitSec * 1000);
 };
 
 var handleReg = (ws: WebSocket, message: WSMessage) => {
@@ -550,17 +764,109 @@ var handleStartGame = (ws: WebSocket, message: WSMessage) => {
     }
 
     game.status = 'in_progress';
-    game.currentQuestion = 0;
-    game.questionStartTime = Date.now();
-    game.playerAnswers.clear();
+    startQuestion(game, 0);
+};
 
-    game.players.forEach((player) => {
-        player.hasAnswered = false;
-        player.answerTime = 0;
-        player.answeredCorrectly = false;
+var handleAnswer = (ws: WebSocket, message: WSMessage) => {
+    var user = getAuthorizedUser(ws);
+
+    if (!user) {
+        sendError(ws, 'You must register first');
+        return;
+    }
+
+    var payload = getAnswerPayload(message.data);
+
+    if (!payload) {
+        sendError(ws, 'Invalid answer payload');
+        return;
+    }
+
+    var userIndex = user.index;
+    var gameId = payload.gameId;
+    var questionIndex = payload.questionIndex;
+    var answerIndex = payload.answerIndex;
+
+    var game = games.find((item) => item.id === gameId);
+
+    if (!game) {
+        sendError(ws, 'Game not found');
+        return;
+    }
+
+    if (game.status !== 'in_progress') {
+        sendError(ws, 'Game is not in progress');
+        return;
+    }
+
+    if (game.currentQuestion !== questionIndex) {
+        sendError(ws, 'Invalid question index');
+        return;
+    }
+
+    var player = game.players.find((item) => item.index === userIndex);
+
+    if (!player) {
+        sendError(ws, 'Only players can answer');
+        return;
+    }
+
+    if (game.playerAnswers.has(userIndex) || player.hasAnswered) {
+        sendError(ws, 'Answer already submitted');
+        return;
+    }
+
+    var question = game.questions[game.currentQuestion];
+
+    if (!question) {
+        sendError(ws, 'Question not found');
+        return;
+    }
+
+    if (!Number.isInteger(answerIndex) || answerIndex < 0 || answerIndex > 3) {
+        sendError(ws, 'Invalid answer index');
+        return;
+    }
+
+    var startedAt = game.questionStartTime;
+
+    if (typeof startedAt !== 'number') {
+        sendError(ws, 'Question is not active');
+        return;
+    }
+
+    var timestamp = Date.now();
+    var deadline = startedAt + question.timeLimitSec * 1000;
+
+    if (timestamp > deadline) {
+        sendError(ws, 'Time is up');
+        return;
+    }
+
+    game.playerAnswers.set(userIndex, {
+        answerIndex: answerIndex,
+        timestamp: timestamp
     });
 
-    broadcastCurrentQuestion(game);
+    player.hasAnswered = true;
+    player.answerTime = timestamp;
+    player.answeredCorrectly = answerIndex === question.correctIndex;
+
+    send(ws, {
+        type: 'answer_accepted',
+        data: {
+            questionIndex: questionIndex
+        },
+        id: 0
+    });
+
+    var allPlayersAnswered =
+        game.players.length > 0 &&
+        game.players.every((item) => item.hasAnswered === true);
+
+    if (allPlayersAnswered) {
+        finishCurrentQuestion(game);
+    }
 };
 
 wss.on('connection', (ws) => {
@@ -590,6 +896,9 @@ wss.on('connection', (ws) => {
             return;
         } else if (parsed.type === 'start_game') {
             handleStartGame(ws, parsed);
+            return;
+        } else if (parsed.type === 'answer') {
+            handleAnswer(ws, parsed);
             return;
         } else {
             sendError(ws, 'Unknown message type');
