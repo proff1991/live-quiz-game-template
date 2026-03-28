@@ -1,7 +1,7 @@
 import { randomInt, randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import type { RawData, WebSocket } from 'ws';
-import type { CreateGameData, Game, JoinGameData, Player, Question, User, WSMessage } from './types';
+import type { CreateGameData, Game, JoinGameData, Player, Question, StartGameData, User, WSMessage } from './types';
 
 var users: User[] = [];
 var games: Game[] = [];
@@ -234,6 +234,26 @@ var getJoinGamePayload = (data: unknown): JoinGameData | null => {
     };
 };
 
+var getStartGamePayload = (data: unknown): StartGameData | null => {
+    if (!isObject(data)) {
+        return null;
+    }
+
+    if (typeof data.gameId !== 'string') {
+        return null;
+    }
+
+    var gameId = data.gameId.trim();
+
+    if (!gameId) {
+        return null;
+    }
+
+    return {
+        gameId: gameId
+    };
+};
+
 var generateRoomCode = () => {
     var alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     var code = '';
@@ -288,6 +308,26 @@ var broadcastPlayersUpdate = (game: Game) => {
                 score: player.score
             };
         }),
+        id: 0
+    });
+};
+
+var broadcastCurrentQuestion = (game: Game) => {
+    var question = game.questions[game.currentQuestion];
+
+    if (!question) {
+        return;
+    }
+
+    broadcastToGame(game, {
+        type: 'question',
+        data: {
+            questionNumber: game.currentQuestion + 1,
+            totalQuestions: game.questions.length,
+            text: question.text,
+            options: question.options,
+            timeLimitSec: question.timeLimitSec
+        },
         id: 0
     });
 };
@@ -469,6 +509,60 @@ var handleJoinGame = (ws: WebSocket, message: WSMessage) => {
     broadcastPlayersUpdate(game);
 };
 
+var handleStartGame = (ws: WebSocket, message: WSMessage) => {
+    var user = getAuthorizedUser(ws);
+
+    if (!user) {
+        sendError(ws, 'You must register first');
+        return;
+    }
+
+    var payload = getStartGamePayload(message.data);
+
+    if (!payload) {
+        sendError(ws, 'Invalid start_game payload');
+        return;
+    }
+
+    var userIndex = user.index;
+    var gameId = payload.gameId;
+
+    var game = games.find((item) => item.id === gameId);
+
+    if (!game) {
+        sendError(ws, 'Game not found');
+        return;
+    }
+
+    if (game.hostId !== userIndex) {
+        sendError(ws, 'Only host can start the game');
+        return;
+    }
+
+    if (game.status !== 'waiting') {
+        sendError(ws, 'Game already started or finished');
+        return;
+    }
+
+    if (game.questions.length < 1) {
+        sendError(ws, 'Game has no questions');
+        return;
+    }
+
+    game.status = 'in_progress';
+    game.currentQuestion = 0;
+    game.questionStartTime = Date.now();
+    game.playerAnswers.clear();
+
+    game.players.forEach((player) => {
+        player.hasAnswered = false;
+        player.answerTime = 0;
+        player.answeredCorrectly = false;
+    });
+
+    broadcastCurrentQuestion(game);
+};
+
 wss.on('connection', (ws) => {
     console.log('Client connected');
 
@@ -493,6 +587,9 @@ wss.on('connection', (ws) => {
             return;
         } else if (parsed.type === 'join_game') {
             handleJoinGame(ws, parsed);
+            return;
+        } else if (parsed.type === 'start_game') {
+            handleStartGame(ws, parsed);
             return;
         } else {
             sendError(ws, 'Unknown message type');
