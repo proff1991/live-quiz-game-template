@@ -4,7 +4,7 @@
 
 1. **Fork** this repository
 2. **Implement** the WebSocket server in the `server/` folder
-3. The **client** (React frontend) in `client/` is already fully implemented and ready to use — do not modify it
+3. The **client** (React frontend) in `client/` is provided and can be used to test the WebSocket backend locally
 
 ## Project structure
 
@@ -30,7 +30,7 @@ npm run dev
 
 # Or run them separately:
 npm run start:server   # server only (ws://localhost:3000)
-npm run start:client   # client only (http://localhost:5173)
+npm run start:client   # client dev server only (http://localhost:5173)
 ```
 
 ## What is provided in `server/`
@@ -77,9 +77,12 @@ Refer to the full assignment specification for detailed data structures and the 
 ## Build for production
 
 ```bash
-# Build server
-cd server && npm run build
+# Build both workspaces
+npm run build
 
-# Start built server
+# Start built server from the root workspace
 npm run start
+
+# Preview built client if needed
+npm run build:start:client
 ```
