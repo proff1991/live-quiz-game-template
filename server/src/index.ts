@@ -348,26 +348,6 @@ var broadcastPlayersUpdate = (game: Game) => {
     });
 };
 
-var broadcastCurrentQuestion = (game: Game) => {
-    var question = game.questions[game.currentQuestion];
-
-    if (!question) {
-        return;
-    }
-
-    broadcastToGame(game, {
-        type: 'question',
-        data: {
-            questionNumber: game.currentQuestion + 1,
-            totalQuestions: game.questions.length,
-            text: question.text,
-            options: question.options,
-            timeLimitSec: question.timeLimitSec
-        },
-        id: 0
-    });
-};
-
 var clearQuestionTimer = (game: Game) => {
     if (game.questionTimer) {
         clearTimeout(game.questionTimer);
